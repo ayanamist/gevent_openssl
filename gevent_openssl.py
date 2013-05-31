@@ -17,13 +17,6 @@ class Connection(_Connection):
         self._timeout = sock.gettimeout()
         self._makefile_refs = 0
 
-    def __getattr__(self, item):
-        assert item != '_sock', item
-        # since socket no longer implements __getattr__ let's do it here
-        # even though it's not good for the same reasons it was not good on socket instances
-        # (it confuses sublcasses)
-        return getattr(self._sock, item)
-
     def accept(self):
         sock, addr = self._sock.accept()
         client = Connection(sock._context, sock)
