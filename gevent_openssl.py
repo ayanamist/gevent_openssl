@@ -1,86 +1,59 @@
 """OpenSSL-based implementation of Connection.
 """
-
+from functools import wraps
 from sys import exc_clear
-from gevent.socket import wait_read, wait_write
-from OpenSSL.SSL import *
-from OpenSSL.SSL import WantReadError, WantWriteError, ZeroReturnError
-from OpenSSL.SSL import Connection as _Connection
+from gevent.socket import wait_read
+from gevent.socket import wait_write
+from OpenSSL.SSL import Connection
+from OpenSSL.SSL import WantReadError
+from OpenSSL.SSL import WantWriteError
+from OpenSSL.SSL import SysCallError
+from OpenSSL.SSL import ZeroReturnError
 
 
-class Connection(_Connection):
-
-    def __init__(self, context, sock):
-        _Connection.__init__(self, context, sock)
-        self._context = context
-        self._sock = sock
-        self._timeout = sock.gettimeout()
-        self._makefile_refs = 0
-
-    def accept(self):
-        sock, addr = self._sock.accept()
-        client = Connection(sock._context, sock)
-        return client, addr
-
-    def do_handshake(self):
+def gevent_wrap(func):
+    @wraps(func)
+    def wrapped(self, *args, **kwargs):
         while True:
             try:
-                _Connection.do_handshake(self)
-                break
+                return func(self, *args, **kwargs)
             except WantReadError:
                 exc_clear()
-                wait_read(self._sock.fileno(), timeout=self._timeout)
+                wait_read(self.fileno(), timeout=self.get_context().get_timeout())
             except WantWriteError:
                 exc_clear()
-                wait_write(self._sock.fileno(), timeout=self._timeout)
+                wait_write(self.fileno(), timeout=self.get_context().get_timeout())
 
-    def connect(self, *args, **kwargs):
-        while True:
-            try:
-                _Connection.connect(self, *args, **kwargs)
-                break
-            except WantReadError:
-                exc_clear()
-                wait_read(self._sock.fileno(), timeout=self._timeout)
-            except WantWriteError:
-                exc_clear()
-                wait_write(self._sock.fileno(), timeout=self._timeout)
+    return wrapped
 
-    def send(self, data, flags=0):
-        while True:
-            try:
-                _Connection.send(self, data, flags)
-                break
-            except WantReadError:
-                exc_clear()
-                wait_read(self._sock.fileno(), timeout=self._timeout)
-            except WantWriteError:
-                exc_clear()
-                wait_write(self._sock.fileno(), timeout=self._timeout)
-            except SysCallError as e:
-                if e[0] == -1 and not data:
-                    # errors when writing empty strings are expected and can be ignored
-                    return 0
-                raise
 
-    def recv(self, bufsiz, flags=0):
-        pending = _Connection.pending(self)
-        if pending:
-            return _Connection.recv(min(pending, bufsiz))
-        while True:
-            try:
-                return _Connection.recv(self, buflen, flags)
-            except WantReadError:
-                exc_clear()
-                wait_read(self._sock.fileno(), timeout=self._timeout)
-            except WantWriteError:
-                exc_clear()
-                wait_write(self._sock.fileno(), timeout=self._timeout)
-            except ZeroReturnError:
-                return ''
+def wrap_send(func):
+    @wraps(func)
+    def wrapped(self, data, *args, **kwargs):
+        try:
+            return func(self, data, *args, **kwargs)
+        except SysCallError as e:
+            if e[0] == -1 and not data:
+                # errors when writing empty strings are expected and can be ignored
+                return 0
+            raise
 
-    def read(self, bufsiz, flags=0):
-        return self.recv(bufsiz, flags)
+    return wrapped
 
-    def write(self, buf, flags=0):
-        return self.sendall(buf, flags)
+
+def wrap_recv(func):
+    @wraps(func)
+    def wrapped(self, *args, **kwargs):
+        try:
+            return func(self, *args, **kwargs)
+        except ZeroReturnError:
+            return ""
+
+    return wrapped
+
+
+def patch_openssl():
+    Connection.do_handshake = gevent_wrap(Connection.do_handshake)
+    Connection.connect = gevent_wrap(Connection.connect)
+    Connection.send = gevent_wrap(wrap_send(Connection.send))
+    Connection.recv = gevent_wrap(wrap_recv(Connection.recv))
